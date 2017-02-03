@@ -7,16 +7,26 @@
     using System.Text;
     using System.Threading;
 
+    public enum EClientState {
+        NotLogged = 0,
+        Logging = 1,
+        LoggedIn = 2
+    }
+
     public class Client {
         public IPEndPoint remoteEndPoint;
         public DateTime connectedAt;
-        public string commandIssued;
+        public EClientState clientState;
+        public string commandIssued = string.Empty;
 
-        public Client(IPEndPoint _remoteEndPoint, DateTime _connectedAt) {
+        public Client(IPEndPoint _remoteEndPoint, DateTime _connectedAt, EClientState _clientState) {
             remoteEndPoint = _remoteEndPoint;
             connectedAt = _connectedAt;
+            clientState = _clientState;
         }
     }
+
+
 
     class Program {
         private static Socket serverSocket;
@@ -25,36 +35,33 @@
         private const int dataSize = 1024;
         private static Dictionary<Socket, Client> clientList = new Dictionary<Socket, Client>();
 
-        public static void Main(string[] args) {
-            int port;
-            if(args.Length == 0 || !int.TryParse(args[0], out port)) port = 1255;
-            Console.WriteLine("Starting on  port {0}...", port);
+        static void Main(string[] args) {
+            Console.WriteLine("Starting...");
             new Thread(new ThreadStart(backgroundThread)) { IsBackground = false }.Start();
             serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            IPEndPoint endPoint = new IPEndPoint(IPAddress.Any, port);
+            IPEndPoint endPoint = new IPEndPoint(IPAddress.Any, 1255);
             serverSocket.Bind(endPoint);
             serverSocket.Listen(0);
-            serverSocket.BeginAccept(new AsyncCallback(acceptConnection), serverSocket);
-            Console.WriteLine("Listening....");
+            serverSocket.BeginAccept(new AsyncCallback(AcceptConnection), serverSocket);
+            Console.WriteLine("Server socket listening to upcoming connections.");
         }
-
         private static void backgroundThread() {
             while(true) {
-                string input = Console.ReadLine();
+                string Input = Console.ReadLine();
 
-                if(input == "clients") {
+                if(Input == "clients") {
                     if(clientList.Count == 0) continue;
                     int clientNumber = 0;
                     foreach(KeyValuePair<Socket, Client> client in clientList) {
                         Client currentClient = client.Value;
                         clientNumber++;
-                        Console.WriteLine(string.Format("Client #{0} (From: {1}:{2}, Connection time: {3})", clientNumber,
-                            currentClient.remoteEndPoint.Address.ToString(), currentClient.remoteEndPoint.Port, currentClient.connectedAt));
+                        Console.WriteLine(string.Format("Client #{0} (From: {1}:{2}, ECurrentState: {3}, Connection time: {4})", clientNumber,
+                            currentClient.remoteEndPoint.Address.ToString(), currentClient.remoteEndPoint.Port, currentClient.clientState, currentClient.connectedAt));
                     }
                 }
 
-                if(input.StartsWith("kill")) {
-                    string[] _Input = input.Split(' ');
+                if(Input.StartsWith("kill")) {
+                    string[] _Input = Input.Split(' ');
                     int clientID = 0;
                     try {
                         if(Int32.TryParse(_Input[1], out clientID) && clientID >= clientList.Keys.Count) {
@@ -72,7 +79,7 @@
                     } catch { Console.WriteLine("Could not kick client: invalid client number specified."); }
                 }
 
-                if(input == "killall") {
+                if(Input == "killall") {
                     int deletedClients = 0;
                     foreach(Socket currentSocket in clientList.Keys.ToArray()) {
                         currentSocket.Shutdown(SocketShutdown.Both);
@@ -84,22 +91,26 @@
                     Console.WriteLine("{0} clients have been disconnected and cleared up.", deletedClients);
                 }
 
-                if(input == "lock") { newClients = false; Console.WriteLine("Refusing new connections."); }
-                if(input == "unlock") { newClients = true; Console.WriteLine("Accepting new connections."); }
+                if(Input == "lock") { newClients = false; Console.WriteLine("Refusing new connections."); }
+                if(Input == "unlock") { newClients = true; Console.WriteLine("Accepting new connections."); }
             }
         }
 
-        private static void acceptConnection(IAsyncResult result) {
+        private static void AcceptConnection(IAsyncResult result) {
             if(!newClients) return;
             Socket oldSocket = (Socket)result.AsyncState;
             Socket newSocket = oldSocket.EndAccept(result);
-            Client client = new Client((IPEndPoint)newSocket.RemoteEndPoint, DateTime.Now);
+            Client client = new Client((IPEndPoint)newSocket.RemoteEndPoint, DateTime.Now, EClientState.NotLogged);
             clientList.Add(newSocket, client);
             Console.WriteLine("Client connected. (From: " + string.Format("{0}:{1}", client.remoteEndPoint.Address.ToString(), client.remoteEndPoint.Port) + ")");
-            serverSocket.BeginAccept(new AsyncCallback(acceptConnection), serverSocket);
+            string output = "-- TELNET TEST SERVER --\n\r\n\r";
+            output += "Please input your password:\n\r";
+            client.clientState = EClientState.Logging;
+            byte[] message = Encoding.ASCII.GetBytes(output);
+            newSocket.BeginSend(message, 0, message.Length, SocketFlags.None, new AsyncCallback(SendData), newSocket);
+            serverSocket.BeginAccept(new AsyncCallback(AcceptConnection), serverSocket);
         }
-
-        private static void sendData(IAsyncResult result) {
+        private static void SendData(IAsyncResult result) {
             try {
                 Socket clientSocket = (Socket)result.AsyncState;
                 clientSocket.EndSend(result);
@@ -117,34 +128,33 @@
                 if(received == 0) {
                     clientSocket.Close();
                     clientList.Remove(clientSocket);
-                    serverSocket.BeginAccept(new AsyncCallback(acceptConnection), serverSocket);
+                    serverSocket.BeginAccept(new AsyncCallback(AcceptConnection), serverSocket);
                     Console.WriteLine("Client disconnected. (From: " + string.Format("{0}:{1}", client.remoteEndPoint.Address.ToString(), client.remoteEndPoint.Port) + ")");
                     return;
                 }
 
                 Console.WriteLine("Received '{0}' (From: {1}:{2})", BitConverter.ToString(data, 0, received), client.remoteEndPoint.Address.ToString(), client.remoteEndPoint.Port);
 
-                // 0x2E & 0X0D => '.' & LF - why????
+                // 0x2E & 0X0D => return/intro
                 if(data[0] == 0x2E && data[1] == 0x0D && client.commandIssued.Length == 0) {
                     string currentCommand = client.commandIssued;
-                    Console.WriteLine(string.Format("Received '{0}' (From: {2}:{3})", currentCommand, client.remoteEndPoint.Address.ToString(), client.remoteEndPoint.Port));
+                    Console.WriteLine(string.Format("Received '{0}' while EClientStatus '{1}' (From: {2}:{3})", currentCommand, client.clientState.ToString(), client.remoteEndPoint.Address.ToString(), client.remoteEndPoint.Port));
                     client.commandIssued = "";
                     byte[] message = Encoding.ASCII.GetBytes("\u001B[1J\u001B[H" + HandleCommand(clientSocket, currentCommand));
-                    clientSocket.BeginSend(message, 0, message.Length, SocketFlags.None, new AsyncCallback(sendData), clientSocket);
-                    // 0x0D & 0x0A => CR/LF
+                    clientSocket.BeginSend(message, 0, message.Length, SocketFlags.None, new AsyncCallback(SendData), clientSocket);
                 } else if(data[0] == 0x0D && data[1] == 0x0A) {
                     string currentCommand = client.commandIssued;
                     Console.WriteLine(string.Format("Received '{0}' (From: {1}:{2}", currentCommand, client.remoteEndPoint.Address.ToString(), client.remoteEndPoint.Port));
                     client.commandIssued = "";
                     byte[] message = Encoding.ASCII.GetBytes("\u001B[1J\u001B[H" + HandleCommand(clientSocket, currentCommand));
-                    clientSocket.BeginSend(message, 0, message.Length, SocketFlags.None, new AsyncCallback(sendData), clientSocket);
+                    clientSocket.BeginSend(message, 0, message.Length, SocketFlags.None, new AsyncCallback(SendData), clientSocket);
                 } else {
-                    // 0x08 => backspace character
+                    // 0x08 => remove character
                     if(data[0] == 0x08) {
                         if(client.commandIssued.Length > 0) {
                             client.commandIssued = client.commandIssued.Substring(0, client.commandIssued.Length - 1);
                             byte[] message = Encoding.ASCII.GetBytes("\u0020\u0008");
-                            clientSocket.BeginSend(message, 0, message.Length, SocketFlags.None, new AsyncCallback(sendData), clientSocket);
+                            clientSocket.BeginSend(message, 0, message.Length, SocketFlags.None, new AsyncCallback(SendData), clientSocket);
                         } else {
                             clientSocket.BeginReceive(data, 0, dataSize, SocketFlags.None, new AsyncCallback(ReceiveData), clientSocket);
                         }
@@ -164,20 +174,41 @@
 
 
 
-        private static string HandleCommand(Socket clientSocket, string input) {
-            string output = "-- TELNET TEST SERVER --\n\r\n\r";
-            byte[] dataInput = Encoding.ASCII.GetBytes(input);
+        private static string HandleCommand(Socket clientSocket, string Input) {
+            string Output = "-- TELNET TEST SERVER --\n\r\n\r";
+            byte[] dataInput = Encoding.ASCII.GetBytes(Input);
             Client client;
             clientList.TryGetValue(clientSocket, out client);
-            if(input == "test") {
-                output += "Hello there.\n\r";
+
+            /*if (client.clientState == EClientState.NotLogged)
+            {
+                Console.WriteLine("Client not logged in, marking login operation in progress...");
+                client.clientState = EClientState.Logging;
+                Output += "Please input your password:\n\r";
+            }*/
+
+            if(client.clientState == EClientState.Logging) {
+                if(Input == "1337") {
+                    Console.WriteLine("Client has logged in (correct password), marking as logged...");
+                    client.clientState = EClientState.LoggedIn;
+                    Output += "Logged successfully.\n\r";
+                } else {
+                    Console.WriteLine("Client login failed (incorrect password).");
+                    Output += "Incorrect password. Please input your password: ";
+                }
             }
-            if(input == "getrekt") {
-                return output;
-            } else {
-                output += "Please enter a valid command:\n\r";
+
+            if(client.clientState == EClientState.LoggedIn) {
+                if(Input == "test") {
+                    Output += "Hello there.\n\r";
+                }
+                if(Input == "getrekt") {
+                    return Output;
+                } else {
+                    Output += "Please enter a valid command:\n\r";
+                }
             }
-            return output;
+            return Output;
         }
     }
 }
